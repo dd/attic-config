@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Manage independent NAS tweaks from a persistent attic-config checkout."""
+
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).absolute().parent
+NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+RESERVED = {"list", "status", "boot"}
+ERRORS = (ValueError, OSError, subprocess.SubprocessError)
+
+
+def secure_path(path: Path) -> None:
+    """Check root ownership, POSIX write permissions and symlinks before loading code."""
+    for item in (path, *path.parents):
+        if item.is_symlink():
+            raise ValueError(f"Symlink is not allowed: {item}")
+        info = item.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError(f"Must be root-owned and not group/world-writable: {item}")
+
+
+def discover() -> list[str]:
+    """Discover modules by directory name without executing their code."""
+    return sorted(path.parent.name for path in (ROOT / "tweaks").glob("*/tweak.py")
+                  if NAME.fullmatch(path.parent.name) and path.parent.name not in RESERVED)
+
+
+def tweak_path(name: str) -> Path:
+    """Resolve only discovered scripts, checking permissions before root execution."""
+    if not NAME.fullmatch(name) or name not in discover():
+        raise ValueError(f"Unknown tweak: {name}")
+    path = ROOT / "tweaks" / name / "tweak.py"
+    if os.geteuid() == 0:
+        secure_path(path)
+    return path
+
+
+def run_tweak(name: str, arguments: list[str]) -> int:
+    """Forward argv and terminal streams without a shell or module import."""
+    result = subprocess.run([sys.executable, "-B", str(tweak_path(name)), *arguments])
+    return result.returncode if result.returncode >= 0 else 128 - result.returncode
+
+
+def read_enabled() -> list[str]:
+    path = ROOT / "local/enabled.json"
+    if path.is_symlink():
+        raise ValueError(f"Symlink is not allowed: {path}")
+    if not path.exists():
+        return []
+    if os.geteuid() == 0:
+        secure_path(path)
+    names = json.loads(path.read_text())
+    if (not isinstance(names, list)
+            or any(not isinstance(name, str) or not NAME.fullmatch(name) for name in names)
+            or len(names) != len(set(names))):
+        raise ValueError("local/enabled.json must be a list of unique tweak names")
+    return sorted(names)
+
+
+def write_enabled(names: list[str]) -> None:
+    """Atomically persist activation; caller holds the management lock."""
+    path = ROOT / "local/enabled.json"
+    fd, temporary = tempfile.mkstemp(prefix=".enabled-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(sorted(names), stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def management_lock():
+    """Serialize mutations and require a protected persistent checkout."""
+    if sys.platform != "linux" or os.geteuid() != 0:
+        raise ValueError("Run management commands as root on the NAS")
+    if not str(ROOT).startswith("/mnt/"):
+        raise ValueError("Use a persistent checkout under /mnt")
+    secure_path(ROOT / "attic")
+    directory = ROOT / "local"
+    if directory.exists() or directory.is_symlink():
+        secure_path(directory)
+    else:
+        directory.mkdir(mode=0o700)
+    path = directory / "manage.lock"
+    if path.exists() or path.is_symlink():
+        secure_path(path)
+    with path.open("a") as stream:
+        os.chmod(path, 0o600)
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        yield
+
+
+def boot(names: list[str]) -> int:
+    """Restore only explicitly enabled tweaks; one failure does not skip the rest."""
+    failed = False
+    for name in names:
+        try:
+            code = run_tweak(name, ["boot"])
+            if code:
+                print(f"{name}: boot failed (exit {code})", file=sys.stderr)
+                failed = True
+        except ERRORS as error:
+            print(f"{name}: {error}", file=sys.stderr)
+            failed = True
+    return int(failed)
+
+
+def manage(name: str, arguments: list[str]) -> int:
+    with management_lock():
+        names = read_enabled()
+        tweak_path(name)
+        action = arguments[0]
+        if action == "uninstall":
+            # Disable first so failed cleanup cannot re-enable it next boot.
+            write_enabled([item for item in names if item != name])
+        code = run_tweak(name, arguments)
+        if action == "install" and code == 0:
+            try:
+                write_enabled(sorted(set(names) | {name}))
+            except OSError as error:
+                raise ValueError(
+                    f"{name}: runtime installed, but activation could not be saved; "
+                    "fix local state storage and repeat install"
+                ) from error
+        return code
+
+
+def all_status() -> int:
+    enabled = read_enabled()
+    failed = False
+    for name in sorted(set(discover()) | set(enabled)):
+        activation = "enabled" if name in enabled else "disabled"
+        print(f"{name}: {activation}", flush=True)
+        try:
+            if run_tweak(name, ["status"]):
+                failed = True
+        except ERRORS as error:
+            print(f"{name}: {error}", file=sys.stderr)
+            failed = True
+    return int(failed)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, usage="%(prog)s {list,status,boot} | TWEAK [COMMAND [ARGS...]]")
+    parser.add_argument("target", help="list, status, boot, or a tweak name")
+    parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    if args.target in RESERVED:
+        if args.arguments:
+            parser.error(f"{args.target} takes no arguments; use TWEAK COMMAND for tweak commands")
+        if args.target == "list":
+            for name in discover():
+                print(name)
+            return 0
+        if args.target == "status":
+            return all_status()
+        with management_lock():
+            return boot(read_enabled())
+    tweak_path(args.target)
+    # Help must never change activation, including `install --help`.
+    if (not args.arguments or any(arg in ("-h", "--help") for arg in args.arguments)
+            or args.arguments[0] == "status"):
+        return run_tweak(args.target, args.arguments)
+    return manage(args.target, args.arguments)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except ERRORS as error:
+        print(f"attic: {error}", file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,5 @@
+{
+  "attempts": 3,
+  "window_seconds": 600,
+  "delay_seconds": 20
+}
