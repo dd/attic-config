@@ -1,49 +1,30 @@
 # Validation record
 
-Проверено локально 2026-11-02 на macOS, без подключения к NAS. **На реальном NAS решение ещё не запускалось.**
+Проверено 2026-11-02 на macOS, без подключения к NAS. **На реальном NAS решение ещё не запускалось.**
 
 
 ## Passed
 
-- 84 offline tests (`python3 -B -m unittest discover -s tests -q`) на Python 3.10, 3.11 и 3.14.
-- CLI `--help`, `list`, `status`; отказ изменения системы на macOS.
-- `git diff --check`.
+- Offline-тесты (`python3 -B -m unittest discover -s tests`) на Python 3.10, 3.11 и 3.14.
+- CLI `--help`, `list`, `status` и отказ менять систему на macOS.
 
-Проверки host/systemd заменены mock-объектами; файловые операции выполняются во временных каталогах. Это не тест реального systemd.
-
-
-## Coverage
-
-| Tests | Count | Scope |
-| --- | --- | --- |
-| `tests/test_attic.py` | 29 | Обнаружение модулей, передача аргументов, коды завершения, включение, boot с ошибками и зависанием, удалённые твики, недоступное состояние |
-| `tests/test_common.py` | 11 | Формат версии, слои настроек, сохранение только отличий, откат при ошибке apply, симлинки |
-| `tests/test_setup.py` | 23 | Имитация middleware: повторная установка и удаление, принятие ручного задания, перенос папки, timeout, дубликаты, частичная очистка, границы изменения прав |
-| `tweaks/avahi-recovery/tests/` | 21 | Границы настроек, содержимое drop-in, идемпотентность, откат, чужие файлы, status, CLI |
+systemd и middleware TrueNAS в тестах заменены mock-объектами.
 
 
 ## Pending on TrueNAS
 
-Setup:
+Setup
 
-- Проверить `git clone` и `git pull` на NAS, то есть наличие git и доступ к приватному репозиторию.
+- Проверить `git clone` и `git pull` на NAS.
 - Проверить фактический формат `/etc/version`. Код принимает `TrueNAS-SCALE-25.10.7`, `TrueNAS-25.10.7` и `25.10.7`.
-- Проверить `attic setup install/status/uninstall`, реальную работу локального midclt, созданное задание и повторный запуск setup.
-- Проверить, что `chmod` проходит на выбранном dataset, потому что на dataset с NFSv4 ACL он может быть запрещён.
-- Проверить одно задание `attic boot` после перезагрузки и доступность dataset.
+- Проверить `attic setup install/status/uninstall` с реальным `midclt` и повторный запуск setup.
+- Проверить, что `chmod` проходит на выбранном dataset.
+- Проверить, что задание `attic boot` срабатывает после перезагрузки.
 
-Avahi:
+Avahi
 
-- Посмотреть vendor unit и журнал реального сбоя и подтвердить, что служба действительно падает и что `Restart=on-failure` подходит.
-- Установить через `attic avahi-recovery install`, проверить `local/enabled.json`, status и применённые `Restart`, `RestartUSec`, `StartLimitBurst`, `StartLimitIntervalUSec`.
-- Проверить падение и перезапуск, исчерпание лимита, намеренный stop в тестовой VM или окно обслуживания.
+- По vendor unit и журналу реального сбоя подтвердить, что служба действительно падает и `Restart=on-failure` подходит.
+- После `install` проверить status и применённые `Restart`, `RestartUSec`, `StartLimitBurst`, `StartLimitIntervalUSec`.
+- В тестовой VM или окне обслуживания проверить падение и перезапуск, исчерпание лимита и намеренный stop.
 - Проверить, не сбрасывает ли `daemon-reload` счётчик лимита при `apply` и `boot`.
 - Проверить, не конфликтует ли политика с управлением службой из middleware TrueNAS.
-- Проверить config/apply, uninstall и отсутствие твика после следующей загрузки.
-
-На этом Mac нет systemd runtime; эти проверки не выполнялись.
-
-
-## Remote repository
-
-При начальной подготовке 2026-10-27 GitHub-коннектор вернул 404 для `dd/attic-config`; HTTPS Git не смог получить credentials в неинтерактивном окружении. В ходе этой переработки доступ повторно не проверялся, push не выполнялся. Перед первой отправкой после настройки доступа сначала получить refs и проверить существующую историю; не использовать force push.

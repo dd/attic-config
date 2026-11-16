@@ -1,4 +1,4 @@
-# Avahi recovery design
+# avahi-recovery
 
 ## Usage
 
@@ -15,9 +15,7 @@ sudo ./attic avahi-recovery uninstall
 Значения по умолчанию лежат в [`config.json`](config.json). `config` редактирует их через `$EDITOR` и сохраняет отличия в `local/config/avahi-recovery.json`. Для включённого твика валидные изменения сразу применяются; для отключённого только сохраняются. Если применение завершается ошибкой, прежние настройки и drop-in восстанавливаются. Редактор можно указать явно, например `sudo EDITOR=nano ./attic avahi-recovery config`.
 
 
-## Scope and evidence
-
-Документация проверена 2026-10-27. TrueNAS 25.10.7 опубликована 2026-09-02 согласно [официальным release notes](https://www.truenas.com/docs/scale/25.10/gettingstarted/scalereleasenotes/). Сам факт этой версии не доказывает наличие конкретного дефекта Avahi. Доступный экспорт предыдущего чата не содержит логов сбоя или текста предложенного решения. Поэтому репозиторий не приписывает падение конкретному upstream issue и не утверждает, что причина устранена.
+## Scope
 
 Это временная мера для случая, когда `avahi-daemon.service` падает, а повторный запуск восстанавливает mDNS. Она не проверяет ответы DNS-SD, не лечит зависшую `active` службу и не гарантирует появление NAS в Finder.
 
@@ -58,21 +56,12 @@ journalctl -b -u avahi-daemon.service --no-pager
 
 Повторить после перезагрузки. На macOS проверить `dns-sd -B _smb._tcp local.` (Ctrl-C для выхода) и `dns-sd -G v4v6 attic.local.`. Использовать фактическое имя NAS, если оно отличается. Состояние `active` само по себе не доказывает корректное обнаружение.
 
-Проверять искусственное падение только в тестовой VM или в согласованное окно. Сначала убедиться, что Avahi active, затем выполнить `sudo systemctl kill --kill-whom=main --signal=SIGABRT avahi-daemon.service`. Это прерывает mDNS и может создать core dump. Наблюдать journal и фактическое повторное обнаружение. `systemctl stop` - проверка намеренной остановки, она не должна вызывать восстановление.
-
-
-## Interface names
-
-В исходниках [Avahi `iface.c`](https://github.com/avahi/avahi/blob/master/avahi-core/iface.c) allow/deny lists проверяются через `strcasecmp` с полным именем интерфейса. `veth*`, `br-*` и другие glob patterns не поддерживаются.
-
-Репозиторий не добавляет allow/deny lists. Если диагностика позднее подтвердит необходимость ограничения интерфейсов, сначала определить реальный LAN-интерфейс (`ip -brief address`), мост или VLAN. Например, `allow-interfaces=br0` имеет смысл только если LAN действительно находится на `br0`. Не исключать все bridge-интерфейсы по названию, потому что среди них может быть основной LAN.
-
-Изменение генерируемого TrueNAS конфига вручную может быть перезаписано системой. Для отдельного решения с фильтрацией сначала проверить механизм генерации именно установленной версии. Этот проект не выдаёт неподтверждённый способ сохранения такой правки за рабочий.
+Проверять искусственное падение только в тестовой VM или в согласованное окно. Сначала убедиться, что Avahi active, затем выполнить `sudo systemctl kill --kill-whom=main --signal=SIGABRT avahi-daemon.service`. Это прерывает mDNS и может создать core dump. Наблюдать journal и фактическое повторное обнаружение. После `systemctl stop` служба перезапускаться не должна.
 
 
 ## Diagnosis
 
-Перед восстановлением или изменением настроек сохранить локально, вне Git:
+Перед изменением настроек сохранить вывод этих команд (не в Git).
 
 ```sh
 systemctl status avahi-daemon.service --no-pager
@@ -86,8 +75,5 @@ ip -brief address
 
 ## References
 
-- [TrueNAS 25.10 release notes](https://www.truenas.com/docs/scale/25.10/gettingstarted/scalereleasenotes/) — версия и дата релиза.
-- [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) — Restart и RestartSec. Документация latest; поведение установленной версии проверять локально.
-- [systemd.unit](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html) — load paths и start limits.
-- [Avahi configuration reference](https://manpages.debian.org/unstable/avahi-daemon/avahi-daemon.conf.5.en.html) — allow/deny lists.
-- [Avahi source](https://github.com/avahi/avahi/blob/master/avahi-core/iface.c) — сравнение точных имён. Ссылка на текущую ветку, не подтверждение версии Avahi, поставляемой с конкретным NAS.
+- [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html) — Restart и RestartSec.
+- [systemd.unit](https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html) — start limits и порядок drop-in.
