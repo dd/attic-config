@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT / "lib"))
 import attic_common as common  # noqa: E402
 from attic_common import NAME, secure_path  # noqa: E402
 
-RESERVED = {"list", "status", "boot", "setup"}
+RESERVED = {"list", "status", "boot", "setup", "update"}
+GIT = "/usr/bin/git"
 ERRORS = (ValueError, OSError, subprocess.SubprocessError)
 BOOT_TIMEOUT = 60
 
@@ -38,11 +39,15 @@ def tweak_path(name: str) -> Path:
     return path
 
 
+def exit_code(result: subprocess.CompletedProcess) -> int:
+    """Report a child killed by a signal the way a shell does."""
+    return result.returncode if result.returncode >= 0 else 128 - result.returncode
+
+
 def run_tweak(name: str, arguments: list[str], timeout: int | None = None) -> int:
     """Forward argv and terminal streams without a shell or module import."""
-    result = subprocess.run([sys.executable, "-B", str(tweak_path(name)), *arguments],
-                            timeout=timeout)
-    return result.returncode if result.returncode >= 0 else 128 - result.returncode
+    return exit_code(subprocess.run([sys.executable, "-B", str(tweak_path(name)), *arguments],
+                                    timeout=timeout))
 
 
 def read_enabled() -> list[str]:
@@ -127,6 +132,21 @@ def forget(name: str) -> int:
     return 0
 
 
+def update() -> int:
+    """Pull the checkout, then let the new code re-run setup and boot."""
+    if sys.platform != "linux" or os.geteuid() != 0:
+        raise ValueError("Run management commands as root on the NAS")
+    # Setup and boot take the management lock themselves, so it is not held here.
+    for command in ([GIT, "-C", str(ROOT), "pull", "--ff-only"],
+                    [sys.executable, "-B", str(ROOT / "attic"), "setup", "install"],
+                    [sys.executable, "-B", str(ROOT / "attic"), "boot"]):
+        code = exit_code(subprocess.run(command))
+        if code:
+            print(f"attic: update stopped: {' '.join(command[-2:])} failed (exit {code})", file=sys.stderr)
+            return code
+    return 0
+
+
 def all_status() -> int:
     enabled = read_enabled()
     failed = False
@@ -144,16 +164,16 @@ def all_status() -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, usage="%(prog)s {list,status,boot,setup} | TWEAK [COMMAND [ARGS...]]")
-    parser.add_argument("target", help="list, status, boot, setup, or a tweak name")
+        description=__doc__,
+        usage="%(prog)s {list,status,boot,setup,update} | TWEAK [COMMAND [ARGS...]]")
+    parser.add_argument("target", help="list, status, boot, setup, update, or a tweak name")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.target == "setup":
         # Bootstrap intentionally runs before ownership repair and management locking.
         # The trusted checkout is selected by the administrator running this command.
-        result = subprocess.run([sys.executable, "-B", str(ROOT / "lib/attic_setup.py"),
-                                 *args.arguments])
-        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+        return exit_code(subprocess.run([sys.executable, "-B", str(ROOT / "lib/attic_setup.py"),
+                                         *args.arguments]))
     if args.target in RESERVED:
         if args.arguments:
             parser.error(f"{args.target} takes no arguments; use TWEAK COMMAND for tweak commands")
@@ -163,6 +183,8 @@ def main(argv=None) -> int:
             return 0
         if args.target == "status":
             return all_status()
+        if args.target == "update":
+            return update()
         with management_lock():
             return boot(read_enabled())
     if args.arguments == ["uninstall"] and args.target not in discover():

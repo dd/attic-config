@@ -35,6 +35,7 @@ sudo ./attic avahi-recovery install
 | `setup uninstall` | Удалить включённые твики, задание Post Init и алиас; файлы и настройки остаются |
 | `list` | Показать доступные твики |
 | `status` | Показать, какие твики включены и работают |
+| `update` | Скачать обновления из Git и применить их |
 | `boot` | Применить все включённые твики (это и вызывает Post Init) |
 | `NAME install` | Установить и включить твик |
 | `NAME uninstall` | Выключить и удалить твик |
@@ -58,11 +59,10 @@ sudo ./attic avahi-recovery install
 ## Update
 
 ```sh
-cd /mnt/POOL/system/attic-config
-sudo git pull --ff-only
-sudo ./attic setup install
-sudo ./attic boot
+sudo attic update
 ```
+
+Без алиаса то же самое из папки проекта делает `sudo ./attic update`. Команда выполняет `git pull`, затем `setup install` и `boot` уже обновлённым кодом.
 
 
 ## Development

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 LOADER = SourceFileLoader("attic", str(Path(__file__).parents[1] / "attic"))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
@@ -264,6 +264,42 @@ class AtticTests(unittest.TestCase):
             self.assertEqual(attic.main(["status"]), 1)
         self.assertIn("example: enabled", output.getvalue())
         self.run.assert_called_once_with("example", ["status"])
+
+    def update_commands(self, codes):
+        """Run update with stubbed children and return the commands it started."""
+        with patch.object(attic.sys, "platform", "linux"), \
+             patch.object(attic.os, "geteuid", return_value=0), \
+             patch.object(attic, "management_lock", side_effect=AssertionError("lock held")), \
+             patch.object(attic.subprocess, "run") as run, \
+             contextlib.redirect_stderr(io.StringIO()):
+            run.side_effect = [Mock(returncode=code) for code in codes]
+            self.code = attic.main(["update"])
+        return [call.args[0] for call in run.call_args_list]
+
+    def test_update_pulls_then_runs_new_setup_and_boot(self):
+        """Setup and boot run as new processes, so they use the freshly pulled code."""
+        commands = self.update_commands([0, 0, 0])
+        self.assertEqual(self.code, 0)
+        self.assertEqual(commands, [
+            [attic.GIT, "-C", str(self.root), "pull", "--ff-only"],
+            [sys.executable, "-B", str(self.root / "attic"), "setup", "install"],
+            [sys.executable, "-B", str(self.root / "attic"), "boot"]])
+
+    def test_update_stops_at_first_failure(self):
+        """A failed pull applies nothing; a failed setup skips boot."""
+        self.assertEqual(len(self.update_commands([1])), 1)
+        self.assertEqual(self.code, 1)
+        self.assertEqual(len(self.update_commands([0, 5])), 2)
+        self.assertEqual(self.code, 5)
+
+    def test_update_requires_root_and_no_arguments(self):
+        """Update never runs git on a workstation and rejects stray arguments."""
+        with patch.object(attic.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "root on the NAS"):
+                attic.main(["update"])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                attic.main(["update", "now"])
+        run.assert_not_called()
 
     def test_management_rejected_on_workstation(self):
         """A mutation on macOS fails before spawning a child or writing state."""
