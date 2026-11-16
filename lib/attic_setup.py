@@ -142,7 +142,7 @@ def install(dispatcher, timeout: int | None) -> None:
         dispatcher.write_enabled(names)
     print(f"Installed in place: {ROOT}")
     print(f"Post Init task {actual['id']}: {actual['command']}")
-    print("No tweaks were enabled or started. Next: attic list, then sudo attic NAME install")
+    print("No tweaks were enabled or started. Next: ./attic list, then sudo ./attic NAME install")
 
 
 def uninstall(dispatcher) -> None:
