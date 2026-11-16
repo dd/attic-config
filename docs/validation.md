@@ -17,6 +17,7 @@ systemd и middleware TrueNAS в тестах заменены mock-объект
 - `git clone`, `setup install` с реальным `midclt` (создано задание Post Init 1), проверка версии и прав.
 - `list` и `status` без `sudo`.
 - `avahi-recovery install`, после него status показывает `installed; Avahi=active; result=success; restarts=0`. Значит, drop-in применился и systemd видит `Restart=on-failure`.
+- После перезагрузки status снова показывает `installed`, то есть задание Post Init `attic boot` восстанавливает твик.
 
 
 ## Pending on TrueNAS
@@ -24,7 +25,6 @@ systemd и middleware TrueNAS в тестах заменены mock-объект
 Setup
 
 - Проверить повторный `setup install`, `setup status` и `setup uninstall`.
-- Проверить, что задание `attic boot` срабатывает после перезагрузки.
 
 Avahi
 

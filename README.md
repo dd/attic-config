@@ -18,6 +18,8 @@ sudo ./attic avahi-recovery install
 
 `setup install` закрепляет за root права на папку и создаёт в TrueNAS задание Post Init `attic boot` (видно в **System → Advanced Settings → Init/Shutdown Scripts**). В систему ничего не копируется, `pip` и `venv` не нужны. Твики включаются только явно, через `NAME install`.
 
+Чтобы команда `attic` работала из любой папки, в том числе с `sudo`, запустить установку с флагом `--shell`, например `sudo ./attic setup install --shell`. Он добавит алиас в `~/.zshrc` или `~/.bashrc` пользователя.
+
 
 ## How it works
 
@@ -28,9 +30,9 @@ sudo ./attic avahi-recovery install
 
 | Command | Effect |
 | --- | --- |
-| `setup install` | Настроить права и задание Post Init; повторять после обновления или переноса папки |
+| `setup install` | Настроить права и задание Post Init; повторять после обновления или переноса папки. `--shell` добавляет алиас `attic`, `--no-shell` убирает его |
 | `setup status` | Показать задание Post Init |
-| `setup uninstall` | Удалить включённые твики и задание Post Init; файлы и настройки остаются |
+| `setup uninstall` | Удалить включённые твики, задание Post Init и алиас; файлы и настройки остаются |
 | `list` | Показать доступные твики |
 | `status` | Показать, какие твики включены и работают |
 | `boot` | Применить все включённые твики (это и вызывает Post Init) |

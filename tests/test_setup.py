@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import shlex
 import subprocess
 import tempfile
@@ -32,6 +33,8 @@ class SetupTests(unittest.TestCase):
         self.tasks = []
         self.mutations = []
         self.api = patch.object(setup, "call", side_effect=self.middleware).start()
+        # Never touch the developer's real shell startup files.
+        patch.object(setup, "shell_state", return_value=(None, None)).start()
 
     def middleware(self, method, *args):
         """Simulate only the CRUD calls used by setup; never execute a real service."""
@@ -301,6 +304,97 @@ class PermissionTests(unittest.TestCase):
             self.assertTrue(setup.call('initshutdownscript.delete', 42))
         run.assert_called_once_with(['/usr/bin/midclt','call','initshutdownscript.delete','42'],
                                     check=True,text=True,capture_output=True,timeout=60)
+
+
+class ShellTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.rc = self.home / '.zshrc'
+        self.entry = pwd.struct_passwd(('dd', 'x', os.getuid(), os.getgid(), '', str(self.home), '/bin/zsh'))
+        self.addCleanup(patch.stopall)
+        patch.object(setup, 'ROOT', Path('/mnt/pool/system/attic-config')).start()
+        patch.object(setup, 'shell_user', return_value=self.entry).start()
+
+    def update(self, choice):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            setup.update_shell(choice)
+        return output.getvalue()
+
+    def test_shell_flag_adds_alias_once_and_keeps_other_lines(self):
+        """Repeated --shell leaves one block and the user's own settings untouched."""
+        self.rc.write_text('export EDITOR=nano')
+        self.update(True)
+        self.update(True)
+        text = self.rc.read_text()
+        self.assertTrue(text.startswith('export EDITOR=nano\n'))
+        self.assertEqual(text.count(setup.SHELL_BEGIN), 1)
+        self.assertIn("alias attic=/mnt/pool/system/attic-config/attic\n", text)
+        self.assertIn("alias sudo='sudo '\n", text)
+
+    def test_no_shell_flag_restores_original_file(self):
+        """--no-shell leaves exactly the user's previous content."""
+        self.rc.write_text('export EDITOR=nano\n')
+        self.update(True)
+        self.assertIn('Removed', self.update(False))
+        self.assertEqual(self.rc.read_text(), 'export EDITOR=nano\n')
+
+    def test_plain_install_never_adds_alias(self):
+        """Without --shell, install only suggests the flag."""
+        self.assertIn('--shell', self.update(None))
+        self.assertFalse(self.rc.exists())
+
+    def test_plain_install_follows_moved_checkout(self):
+        """An alias added earlier points at the checkout that ran install last."""
+        self.update(True)
+        with patch.object(setup, 'ROOT', Path('/mnt/other/attic-config')):
+            self.assertIn('Updated', self.update(None))
+        self.assertIn('alias attic=/mnt/other/attic-config/attic', self.rc.read_text())
+
+    def test_uninstall_removes_alias(self):
+        """Setup uninstall takes the alias away with the rest of the integration."""
+        self.update(True)
+        self.assertEqual(setup.shell_state(None)[0], 'changed')
+        self.assertNotIn(setup.SHELL_BEGIN, self.rc.read_text())
+
+    def test_flags_reach_install_and_exclude_each_other(self):
+        """The parser maps --shell/--no-shell/nothing to True/False/None."""
+        for args, expected in (([], None), (['--shell'], True), (['--no-shell'], False)):
+            with self.subTest(args=args), patch.object(setup, 'check_host'), \
+                 patch.object(setup, 'prepare_permissions'), \
+                 patch.object(setup, 'load_dispatcher') as dispatcher, \
+                 patch.object(setup, 'install') as install:
+                dispatcher.return_value.management_lock.return_value = contextlib.nullcontext()
+                setup.main(['install', *args])
+                self.assertEqual(install.call_args.args[2], expected)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            setup.main(['install', '--shell', '--no-shell'])
+
+    def test_path_with_spaces_is_quoted(self):
+        """A checkout path with spaces stays one alias value."""
+        with patch.object(setup, 'ROOT', Path('/mnt/pool/my admin/attic-config')):
+            self.assertIn("alias attic='/mnt/pool/my admin/attic-config/attic'", setup.shell_block())
+
+    def test_unterminated_block_is_refused(self):
+        """A damaged block is never used as a reason to drop the rest of the file."""
+        self.rc.write_text(f'{setup.SHELL_BEGIN}\nalias attic=x\nexport KEEP=1\n')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(ValueError):
+            self.update(True)
+        self.assertIn('export KEEP=1', self.rc.read_text())
+
+    def test_unsupported_shell_and_root_are_refused(self):
+        """Only zsh/bash files of a real user account are edited."""
+        fish = pwd.struct_passwd(('dd', 'x', 1000, 1000, '', '/home/dd', '/usr/bin/fish'))
+        with self.assertRaisesRegex(ValueError, 'Unsupported shell'):
+            setup.rc_path(fish)
+        patch.stopall()
+        root = pwd.struct_passwd(('root', 'x', 0, 0, '', '/root', '/bin/zsh'))
+        with patch.object(setup.os, 'geteuid', return_value=0), \
+             patch.dict(setup.os.environ, {}, clear=True), \
+             patch.object(setup.pwd, 'getpwuid', return_value=root):
+            with self.assertRaisesRegex(ValueError, 'not as root'):
+                setup.shell_user()
 
 
 if __name__ == '__main__':

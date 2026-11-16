@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import shlex
 import stat
 import subprocess
@@ -20,6 +21,9 @@ MIDCLT = "/usr/bin/midclt"
 PYTHON = "/usr/bin/python3"
 MARKER = "attic-config: managed boot v1"
 SUPPORTED = "25.10.7"
+SHELL_BEGIN = "# >>> attic-config >>>"
+SHELL_END = "# <<< attic-config <<<"
+RC_FILES = {"zsh": ".zshrc", "bash": ".bashrc"}
 
 
 def call(method: str, *arguments):
@@ -122,7 +126,7 @@ def select_task(tasks, *, adopt: bool):
     return None
 
 
-def install(dispatcher, timeout: int | None) -> None:
+def install(dispatcher, timeout: int | None, shell: bool | None = None) -> None:
     task = select_task(call("initshutdownscript.query"), adopt=True)
     desired = {
         "type": "COMMAND", "command": boot_command(), "when": "POSTINIT",
@@ -143,6 +147,7 @@ def install(dispatcher, timeout: int | None) -> None:
     print(f"Installed in place: {ROOT}")
     print(f"Post Init task {actual['id']}: {actual['command']}")
     print("No tweaks were enabled or started. Next: ./attic list, then sudo ./attic NAME install")
+    update_shell(shell)
 
 
 def uninstall(dispatcher) -> None:
@@ -179,6 +184,9 @@ def uninstall(dispatcher) -> None:
         call("initshutdownscript.delete", task["id"])
         if any(item["id"] == task["id"] for item in call("initshutdownscript.query")):
             raise ValueError("Task deletion was not confirmed; inspect TrueNAS tasks")
+    state, path = shell_state(None)
+    if state == "changed":
+        print(f"Removed the attic alias from {path}")
     print("Integration removed. Source files, configs and local state remain in the dataset.")
 
 
@@ -193,13 +201,125 @@ def status() -> None:
         print(task["command"])
 
 
+def shell_user():
+    """The account that ran setup, including when it was started through sudo."""
+    name = os.environ.get("SUDO_USER") if os.geteuid() == 0 else None
+    entry = pwd.getpwnam(name) if name else pwd.getpwuid(os.getuid())
+    if entry.pw_uid == 0:
+        raise ValueError("Run from your own account, directly or through sudo, not as root")
+    return entry
+
+
+def rc_path(entry) -> Path:
+    name = RC_FILES.get(Path(entry.pw_shell).name)
+    if name is None:
+        raise ValueError(f"Unsupported shell {entry.pw_shell}; add alias attic={ROOT / 'attic'} manually")
+    return Path(entry.pw_dir) / name
+
+
+def shell_block() -> str:
+    # sudo ignores aliases unless its own alias ends with a space.
+    return (f"{SHELL_BEGIN}\nalias attic={shlex.quote(str(ROOT / 'attic'))}\n"
+            f"alias sudo='sudo '\n{SHELL_END}\n")
+
+
+def replace_block(text: str, block: str | None) -> str:
+    """Drop our marked block, then append a fresh one if given; other lines stay intact."""
+    kept, inside = [], False
+    for line in text.splitlines(keepends=True):
+        marker = line.rstrip("\n")
+        if marker == SHELL_BEGIN:
+            inside = True
+        elif marker == SHELL_END and inside:
+            inside = False
+        elif not inside:
+            kept.append(line)
+    if inside:
+        raise ValueError(f"Unterminated {SHELL_BEGIN} block; fix the file manually")
+    result = "".join(kept)
+    if block:
+        if result and not result.endswith("\n"):
+            result += "\n"
+        result += block
+    return result
+
+
+def edit_rc(entry, path: Path, block: str | None, *, only_existing: bool = False) -> str:
+    """Edit the file with the user's own rights, so root never follows a link planted there.
+
+    Returns "changed", "unchanged" or "absent" (only_existing and no block yet).
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            if os.geteuid() == 0:
+                os.setgroups([])
+                os.setgid(entry.pw_gid)
+                os.setuid(entry.pw_uid)
+            old = path.read_text() if path.exists() else ""
+            if only_existing and SHELL_BEGIN not in old:
+                code = 3
+            else:
+                new = replace_block(old, block)
+                if new != old:
+                    path.write_text(new)
+                code = 2 if new != old else 0
+        except Exception as error:
+            print(f"attic setup: {path}: {error}", file=sys.stderr, flush=True)
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    result = {0: "unchanged", 2: "changed", 3: "absent"}.get(os.waitstatus_to_exitcode(status))
+    if result is None:
+        raise ValueError(f"Could not update {path}")
+    return result
+
+
+def shell_state(block: str | None) -> tuple[str | None, Path | None]:
+    """Keep an existing alias in step with this checkout; never add one unasked."""
+    try:
+        entry = shell_user()
+        path = rc_path(entry)
+        return edit_rc(entry, path, block, only_existing=True), path
+    except (ValueError, OSError, KeyError) as error:
+        print(f"attic setup: shell alias skipped: {error}", file=sys.stderr)
+        return None, None
+
+
+def update_shell(choice: bool | None) -> None:
+    """--shell adds the alias and --no-shell removes it; without either, only an existing one is updated."""
+    if choice is None:
+        state, path = shell_state(shell_block())
+        if state == "absent":
+            print("Optional: rerun with --shell to make the attic command available in any directory")
+        elif state == "changed":
+            print(f"Updated the attic alias in {path}")
+        return
+    entry = shell_user()
+    path = rc_path(entry)
+    changed = edit_rc(entry, path, shell_block() if choice else None) == "changed"
+    if not choice:
+        print(f"Removed the attic alias from {path}" if changed else f"No attic alias in {path}")
+    else:
+        print(f"attic alias {'added to' if changed else 'already in'} {path}")
+        print(f"Open a new shell or run: source {path}")
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(prog="attic setup", description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
     install_parser = commands.add_parser("install", help="Secure checkout and register Post Init")
     install_parser.add_argument("--timeout", type=int, help="Post Init timeout in seconds (default: existing value or 120)")
+    alias = install_parser.add_mutually_exclusive_group()
+    alias.add_argument("--shell", dest="shell", action="store_true",
+                       help="Add the attic alias to your zsh or bash startup file")
+    alias.add_argument("--no-shell", dest="shell", action="store_false", help="Remove that alias")
+    install_parser.set_defaults(shell=None)
     commands.add_parser("status", help="Inspect checkout path and Post Init integration")
-    commands.add_parser("uninstall", help="Remove enabled tweaks, then the managed Post Init task")
+    commands.add_parser("uninstall", help="Remove enabled tweaks, the managed Post Init task and the alias")
     args = parser.parse_args(argv)
     timeout = getattr(args, "timeout", None)
     if timeout is not None and not 10 <= timeout <= 3600:
@@ -213,7 +333,7 @@ def main(argv=None) -> None:
     with dispatcher.management_lock():
         dispatcher.read_enabled()  # Refuse corrupt state before middleware writes.
         if args.action == "install":
-            install(dispatcher, timeout)
+            install(dispatcher, timeout, args.shell)
         else:
             uninstall(dispatcher)
 
