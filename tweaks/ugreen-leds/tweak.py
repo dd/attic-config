@@ -550,7 +550,9 @@ def install():
         if old != data:
             common.atomic_write(path, data)
         systemctl("daemon-reload")
-        systemctl("reset-failed", SERVICE)
+        # Clears an exhausted start limit; systemd exits 1 when the unit is not failed.
+        subprocess.run([SYSTEMCTL, "reset-failed", SERVICE], timeout=30, check=False,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         systemctl("start", SERVICE)
         wait_running()
     except Exception:
