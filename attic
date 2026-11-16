@@ -7,25 +7,18 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
-import tempfile
 
 ROOT = Path(__file__).absolute().parent
-NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-RESERVED = {"list", "status", "boot"}
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / "lib"))
+import attic_common as common  # noqa: E402
+from attic_common import NAME, secure_path  # noqa: E402
+
+RESERVED = {"list", "status", "boot", "setup"}
 ERRORS = (ValueError, OSError, subprocess.SubprocessError)
-
-
-def secure_path(path: Path) -> None:
-    """Check root ownership, POSIX write permissions and symlinks before loading code."""
-    for item in (path, *path.parents):
-        if item.is_symlink():
-            raise ValueError(f"Symlink is not allowed: {item}")
-        info = item.stat()
-        if info.st_uid != 0 or info.st_mode & 0o022:
-            raise ValueError(f"Must be root-owned and not group/world-writable: {item}")
+BOOT_TIMEOUT = 60
 
 
 def discover() -> list[str]:
@@ -40,46 +33,29 @@ def tweak_path(name: str) -> Path:
         raise ValueError(f"Unknown tweak: {name}")
     path = ROOT / "tweaks" / name / "tweak.py"
     if os.geteuid() == 0:
+        secure_path(ROOT / "lib/attic_common.py")
         secure_path(path)
     return path
 
 
-def run_tweak(name: str, arguments: list[str]) -> int:
+def run_tweak(name: str, arguments: list[str], timeout: int | None = None) -> int:
     """Forward argv and terminal streams without a shell or module import."""
-    result = subprocess.run([sys.executable, "-B", str(tweak_path(name)), *arguments])
+    result = subprocess.run([sys.executable, "-B", str(tweak_path(name)), *arguments],
+                            timeout=timeout)
     return result.returncode if result.returncode >= 0 else 128 - result.returncode
 
 
 def read_enabled() -> list[str]:
-    path = ROOT / "local/enabled.json"
-    if path.is_symlink():
-        raise ValueError(f"Symlink is not allowed: {path}")
-    if not path.exists():
-        return []
-    if os.geteuid() == 0:
-        secure_path(path)
-    names = json.loads(path.read_text())
-    if (not isinstance(names, list)
-            or any(not isinstance(name, str) or not NAME.fullmatch(name) for name in names)
-            or len(names) != len(set(names))):
-        raise ValueError("local/enabled.json must be a list of unique tweak names")
-    return sorted(names)
+    return common.read_enabled(ROOT)
 
 
 def write_enabled(names: list[str]) -> None:
-    """Atomically persist activation; caller holds the management lock."""
-    path = ROOT / "local/enabled.json"
-    fd, temporary = tempfile.mkstemp(prefix=".enabled-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            os.fchmod(stream.fileno(), 0o600)
-            json.dump(sorted(names), stream, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+    """Atomically persist activation; caller holds the management lock.
+
+    The list holds no secrets and stays readable so status works without root.
+    """
+    data = json.dumps(sorted(names), indent=2) + "\n"
+    common.atomic_write(ROOT / "local/enabled.json", data.encode(), 0o644)
 
 
 @contextlib.contextmanager
@@ -90,11 +66,12 @@ def management_lock():
     if not str(ROOT).startswith("/mnt/"):
         raise ValueError("Use a persistent checkout under /mnt")
     secure_path(ROOT / "attic")
+    secure_path(ROOT / "lib/attic_common.py")
     directory = ROOT / "local"
     if directory.exists() or directory.is_symlink():
         secure_path(directory)
     else:
-        directory.mkdir(mode=0o700)
+        directory.mkdir(mode=0o755)
     path = directory / "manage.lock"
     if path.exists() or path.is_symlink():
         secure_path(path)
@@ -105,11 +82,11 @@ def management_lock():
 
 
 def boot(names: list[str]) -> int:
-    """Restore only explicitly enabled tweaks; one failure does not skip the rest."""
+    """Restore only explicitly enabled tweaks; one failure or hang does not skip the rest."""
     failed = False
     for name in names:
         try:
-            code = run_tweak(name, ["boot"])
+            code = run_tweak(name, ["boot"], timeout=BOOT_TIMEOUT)
             if code:
                 print(f"{name}: boot failed (exit {code})", file=sys.stderr)
                 failed = True
@@ -139,6 +116,17 @@ def manage(name: str, arguments: list[str]) -> int:
         return code
 
 
+def forget(name: str) -> int:
+    """Drop a tweak whose folder left the checkout; its code cannot run any cleanup."""
+    with management_lock():
+        names = read_enabled()
+        if name not in names:
+            raise ValueError(f"Unknown tweak: {name}")
+        write_enabled([item for item in names if item != name])
+    print(f"{name}: removed from the boot list; its code is gone, so reboot to clear runtime files")
+    return 0
+
+
 def all_status() -> int:
     enabled = read_enabled()
     failed = False
@@ -156,10 +144,16 @@ def all_status() -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, usage="%(prog)s {list,status,boot} | TWEAK [COMMAND [ARGS...]]")
-    parser.add_argument("target", help="list, status, boot, or a tweak name")
+        description=__doc__, usage="%(prog)s {list,status,boot,setup} | TWEAK [COMMAND [ARGS...]]")
+    parser.add_argument("target", help="list, status, boot, setup, or a tweak name")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.target == "setup":
+        # Bootstrap intentionally runs before ownership repair and management locking.
+        # The trusted checkout is selected by the administrator running this command.
+        result = subprocess.run([sys.executable, "-B", str(ROOT / "lib/attic_setup.py"),
+                                 *args.arguments])
+        return result.returncode if result.returncode >= 0 else 128 - result.returncode
     if args.target in RESERVED:
         if args.arguments:
             parser.error(f"{args.target} takes no arguments; use TWEAK COMMAND for tweak commands")
@@ -171,6 +165,8 @@ def main(argv=None) -> int:
             return all_status()
         with management_lock():
             return boot(read_enabled())
+    if args.arguments == ["uninstall"] and args.target not in discover():
+        return forget(args.target)
     tweak_path(args.target)
     # Help must never change activation, including `install --help`.
     if (not args.arguments or any(arg in ("-h", "--help") for arg in args.arguments)

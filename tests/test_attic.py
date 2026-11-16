@@ -31,6 +31,7 @@ class AtticTests(unittest.TestCase):
         """Keep real state persistence while replacing privileges and child processes."""
         patch.object(attic, "management_lock", contextlib.nullcontext).start()
         patch.object(attic, "secure_path").start()
+        patch.object(attic, "discover", return_value=["example"]).start()
         patch.object(attic, "tweak_path", return_value=self.root / "tweak.py").start()
         self.run = patch.object(attic, "run_tweak", return_value=0).start()
 
@@ -52,6 +53,15 @@ class AtticTests(unittest.TestCase):
         (folder / "tweak.py").touch()
         self.assertEqual(attic.discover(), [])
 
+    def test_setup_dispatches_before_runtime_management(self):
+        """Bootstrap forwards options without needing the permissions it will prepare."""
+        with patch.object(attic, "management_lock", side_effect=AssertionError("premature lock")), \
+             patch.object(attic.subprocess, "run") as run:
+            run.return_value.returncode = 5
+            self.assertEqual(attic.main(["setup", "install", "--timeout", "240"]), 5)
+        run.assert_called_once_with([sys.executable, "-B", str(self.root / "lib/attic_setup.py"),
+                                     "install", "--timeout", "240"])
+
     def test_path_traversal_rejected(self):
         """User-supplied names cannot escape the tweaks directory."""
         with self.assertRaisesRegex(ValueError, "Unknown tweak"):
@@ -65,7 +75,7 @@ class AtticTests(unittest.TestCase):
              patch.object(attic.subprocess, "run") as run:
             run.return_value.returncode = 17
             self.assertEqual(attic.run_tweak("example", args), 17)
-        run.assert_called_once_with([sys.executable, "-B", str(path), *args])
+        run.assert_called_once_with([sys.executable, "-B", str(path), *args], timeout=None)
 
     def test_real_child_receives_arguments_and_returns_exit_code(self):
         """A real offline fixture CLI receives unchanged argv and its exit code propagates."""
@@ -166,7 +176,7 @@ class AtticTests(unittest.TestCase):
         self.stub_management()
         attic.write_enabled(["example"])
         self.assertEqual(attic.main(["boot"]), 0)
-        self.run.assert_called_once_with("example", ["boot"])
+        self.run.assert_called_once_with("example", ["boot"], timeout=attic.BOOT_TIMEOUT)
         self.assertEqual(attic.read_enabled(), ["example"])
 
     def test_boot_without_state_does_nothing(self):
@@ -192,6 +202,44 @@ class AtticTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(attic.main(["boot"]), 1)
         self.assertEqual(self.run.call_count, 2)
+
+    def test_boot_continues_after_hung_tweak(self):
+        """A tweak that exceeds its time limit does not consume the others' boot."""
+        self.stub_management()
+        attic.write_enabled(["first", "second"])
+        self.run.side_effect = [subprocess.TimeoutExpired("tweak.py", attic.BOOT_TIMEOUT), 0]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(attic.main(["boot"]), 1)
+        self.assertEqual(self.run.call_count, 2)
+
+    def test_uninstall_of_deleted_tweak_clears_activation(self):
+        """A tweak removed from the checkout can leave the boot list without its code."""
+        self.stub_management()
+        attic.write_enabled(["example", "gone"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(attic.main(["gone", "uninstall"]), 0)
+        self.assertEqual(attic.read_enabled(), ["example"])
+        self.run.assert_not_called()
+
+    def test_uninstall_of_unknown_name_is_refused(self):
+        """A mistyped name is an error, not a silent success."""
+        self.stub_management()
+        with self.assertRaisesRegex(ValueError, "Unknown tweak"):
+            attic.main(["typo", "uninstall"])
+
+    def test_activation_file_is_readable_without_root(self):
+        """Status on the NAS reads the list without sudo."""
+        self.stub_management()
+        attic.write_enabled(["example"])
+        self.assertEqual((self.root / "local/enabled.json").stat().st_mode & 0o777, 0o644)
+
+    def test_unreadable_state_is_an_error_not_disabled(self):
+        """Denied access must not make an enabled tweak look disabled."""
+        (self.root / "local/enabled.json").write_text('["example"]')
+        (self.root / "local").chmod(0)
+        self.addCleanup((self.root / "local").chmod, 0o700)
+        with self.assertRaises(PermissionError):
+            attic.read_enabled()
 
     def test_corrupt_state_fails_closed(self):
         """Malformed activation state cannot trigger operations."""
