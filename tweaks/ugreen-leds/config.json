@@ -1,0 +1,14 @@
+{
+  "model": "auto",
+  "slots": "auto",
+  "activity": "dark",
+  "interval_ms": 100,
+  "refresh_seconds": 30,
+  "zfs": true,
+  "brightness": 255,
+  "color": [255, 255, 255],
+  "fault_color": [255, 0, 0],
+  "network": "auto",
+  "network_color": [255, 165, 0],
+  "power_color": [255, 255, 255]
+}

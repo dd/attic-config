@@ -52,6 +52,7 @@ sudo ./attic avahi-recovery install
 | Tweak | Purpose |
 | --- | --- |
 | [avahi-recovery](tweaks/avahi-recovery/README.md) | Ограниченный автоматический перезапуск Avahi после падения |
+| [ugreen-leds](tweaks/ugreen-leds/README.md) | Индикаторы активности и состояния дисков UGREEN без модуля ядра |
 
 Настройки по умолчанию лежат в `tweaks/NAME/config.json`, а изменённые через `NAME config` значения — в `local/config/NAME.json`. Список включённых твиков хранится в `local/enabled.json`. `local/` не входит в Git, поэтому обновление не затрагивает настройки.
 
